@@ -7,6 +7,7 @@ import (
   "time"
   "net"
   "strings"
+	"bytes"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -20,8 +21,13 @@ func init() {
 	httpcaddyfile.RegisterHandlerDirective("watch_doctor", parseCaddyfile)
 }
 
-// Middleware implements an HTTP handler that writes the
-// visitor's IP address to a file or stream.
+type Notification struct {
+	Type string `json:"type"`
+	Server string `json:"server"`
+	TimeChecked time.Time
+}
+
+// Middleware implements an HTTP handler
 type Middleware struct {
 	// The file or stream to write to. Can be "stdout"
 	// or "stderr".
@@ -46,8 +52,8 @@ func (Middleware) CaddyModule() caddy.ModuleInfo {
 
 func (m *Middleware) Cleanup() error {
 
-  for url, channel := range m.watcherChannels {
-    fmt.Println("Cleaning up routine for ", url)
+  for _, channel := range m.watcherChannels {
+    // fmt.Println("Cleaning up routine for ", url)
     channel <- true
 
   }
@@ -64,14 +70,6 @@ func (m *Middleware) Provision(ctx caddy.Context) error {
   fmt.Println("Watchdoctor: Provision: Your module properties are:")
   b, _ := json.Marshal(m)
   fmt.Println(string(b))
-	// switch m.Output {
-	// case "stdout":
-	// 	m.w = os.Stdout
-	// case "stderr":
-	// 	m.w = os.Stderr
-	// default:
-	// 	return fmt.Errorf("Watchdoctor: Provision: an output stream is required")
-	// }
 	return nil
 }
 
@@ -83,28 +81,36 @@ func (m *Middleware) Validate() error {
   // May be this one should go to provision
   m.setUpWatcher()
 
-	// if m.w == nil {
-	// 	return fmt.Errorf("no writer")
-	// }
 	return nil
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (m Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 
-  host :=  "127.0.0.1:9000"
-  fmt.Println("Pinging server: 127.0.0.1:9000")
-  timeout := time.Duration(1 * time.Second)
-  _, err := net.DialTimeout("tcp", host, timeout)
-
-  if err != nil {
-    fmt.Printf("Down %s with error %s", host, err.Error())
-  } else {
-    fmt.Printf("%s is healthy", host)
-
-  }
+	// remove this interface. But which package should we add it to?
 
 	return next.ServeHTTP(w, r)
+}
+
+
+func (m *Middleware) getTCPURL(originalURL string) string {
+
+		url := strings.Replace(originalURL, "https://", "", 1)
+		url = strings.Replace(url, "http://", "", 1)
+		url = strings.TrimSpace(url)
+		return url
+
+}
+
+func (m *Middleware) parseServersToMonitor(serversStr string) []string {
+
+
+	servers := strings.Split(serversStr, " ")
+	for i, url := range servers {
+		servers[i] = m.getTCPURL(url)
+	}
+	return servers
+
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
@@ -113,10 +119,15 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
   var monitoredServersStr string
   var intervalStr string
   var timeoutStr string
-  done := d.Args(&m.DirectiveName, &intervalStr, &timeoutStr, &m.NotificationServer, &monitoredServersStr)
 
-  m.MonitorredServers = strings.Split(monitoredServersStr, " ")
-  // m.Interval, err = strconv.Atoi(intervalStr)
+  done := d.Args(&m.DirectiveName, &intervalStr, &timeoutStr, &m.NotificationServer, &monitoredServersStr)
+  if done == false {
+    return d.ArgErr()
+  }
+
+	m.NotificationServer = strings.TrimSpace(m.NotificationServer)
+  m.MonitorredServers = m.parseServersToMonitor(monitoredServersStr)
+
   interval, err := time.ParseDuration(intervalStr)
   if err != nil {
     return err
@@ -128,19 +139,10 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
     return err
   }
   m.Timeout = timeout
-  fmt.Println(monitoredServersStr)
-  fmt.Println(m.MonitorredServers)
 
-	// for d.Next() {
-  //   // fmt.Fprintln(os.Stdout, "next arg is: ", d.Val())
-  //   fmt.Println("next arg is: ", d.Val())
-	// 	// if !d.Args(&m.Output) {
-	// 	// 	return d.ArgErr()
-	// 	// }
-	// }
-  if done == false {
-    return d.ArgErr()
-  }
+  // fmt.Println(monitoredServersStr)
+  // fmt.Println(m.MonitorredServers)
+
 	return nil
 }
 
@@ -159,9 +161,11 @@ func (m *Middleware) validateNotificationServer() error {
     return fmt.Errorf("No notification server given!")
   }
 
-  _, err := net.DialTimeout("tcp", m.NotificationServer, m.Timeout)
+  // _, err := net.DialTimeout("tcp", m.NotificationServer, m.Timeout)
 
   // send a welcome notification to the notification server.
+
+	err := m.pingServer(m.getTCPURL(m.NotificationServer))
 
   if err != nil {
     return fmt.Errorf("Notification server unreachable at %s", m.NotificationServer)
@@ -173,9 +177,9 @@ func (m *Middleware) validateNotificationServer() error {
 
 
 func (m *Middleware) setUpWatcher() {
-
+	m.logger.Debug("Setting up watchers for Backend servers")
   for _, url := range m.MonitorredServers {
-    fmt.Println("Setting up watcher for ", url)
+    // fmt.Println("Setting up watcher for ", url)
     // create a channel
     m.watcherChannels[url] = make(chan bool, 1) // needs to be buffered as server may shutdown before any goroutine is created
     // create a goroutine
@@ -186,19 +190,43 @@ func (m *Middleware) setUpWatcher() {
 
 func (m *Middleware) notifyDown(downServer string) {
   // send a message to notfication server that downServer is down
-    fmt.Println("Sending down signal for server", downServer)
+    // fmt.Println("\nnotifyDown: Sending down signal for server", downServer)
+		m.logger.Error("Backend server down", zap.String("server", downServer))
+		message := Notification{
+			Type: "Down",
+			Server: downServer,
+			TimeChecked: time.Now(),
+		}
+		messageBytes, err := json.Marshal(message)
+	  // fmt.Println(string(messageBytes))
+
+		if err == nil {
+			// # send the message to notification server
+			requestBody := bytes.NewBuffer(messageBytes)
+			client := http.Client{Timeout: m.Timeout}
+			resp, err := client.Post(m.NotificationServer, "application/json", requestBody)
+			if err != nil {
+				m.logger.Error("Error occurred during sending notification", zap.String("error", err.Error()))
+				return
+			}
+			defer resp.Body.Close()
+
+		} else {
+			m.logger.Error("Cannot marshal notification", zap.String("error", err.Error()))
+		}
+
 }
 
 func watcher(owner *Middleware, stopSignal <-chan bool, url string) {
   for {
     select {
       case <-stopSignal:
-        fmt.Println("Stopping watcher for %s", url)
+        // fmt.Printf("\nStopping watcher for %s", url)
         return
       // case <-time.After(owner.Interval * time.Second):
 
       case <-time.After(owner.Interval):
-        fmt.Println("2 second passed and calling pingServer.")
+        // fmt.Println("2 second passed and calling pingServer.")
         err := owner.pingServer(url)
         if err != nil {
           owner.notifyDown(url)
@@ -209,14 +237,14 @@ func watcher(owner *Middleware, stopSignal <-chan bool, url string) {
 
 func (m *Middleware) pingServer(url string) error {
 
-    fmt.Println("Pinging server: %s", url)
+    // fmt.Printf("\nPinging server: %s\n", url)
 
     _, err := net.DialTimeout("tcp", url, m.Timeout)
     if err != nil {
-      fmt.Println("Down %s with error %s", url, err.Error())
-      return fmt.Errorf("Down %s with error %s", url, err.Error())
+      // fmt.Printf("\nDown %s with error %s", url, err.Error())
+      return fmt.Errorf("\nDown %s with error %s", url, err.Error())
     } else {
-      fmt.Println("%s is healthy", url)
+      // fmt.Printf("\n%s is healthy", url)
 
     }
     return nil
