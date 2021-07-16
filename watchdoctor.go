@@ -104,12 +104,20 @@ func (m *Middleware) getTCPURL(originalURL string) string {
 
 func (m *Middleware) parseServersToMonitor(serversStr string) []string {
 
+	// fmt.Println(serversStr)
 
 	servers := strings.Split(serversStr, " ")
-	for i, url := range servers {
-		servers[i] = m.getTCPURL(url)
+	sanitizedServers := make([]string, 0, len(servers))
+	for _, url := range servers {
+		sanitizeUrl :=  m.getTCPURL(url)
+
+		// fmt.Printf("\nparsed url is %s with len %d", sanitizeUrl, len(sanitizeUrl))
+		if len(sanitizeUrl) > 0 {
+			// fmt.Printf("\nadding server %s with len %d", sanitizeUrl, len(sanitizeUrl))
+			sanitizedServers = append(sanitizedServers, sanitizeUrl)
+		}
 	}
-	return servers
+	return sanitizedServers
 
 }
 

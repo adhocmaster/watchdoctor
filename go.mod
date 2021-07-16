@@ -1,3 +1,3 @@
-module http.handlers/watchdoctor
+module github.com/adhocmaster/watchdoctor
 
 go 1.16
